@@ -79,7 +79,7 @@ install_dependencies() {
     
     # 安装依赖
     $PKG_MANAGER update -y
-    $PKG_MANAGER install -y bc curl ifstat jq
+    $PKG_MANAGER install -y bc curl ifstat jq sysstat
     
     echo -e "${GREEN}依赖安装完成${NC}"
     return 0
@@ -106,7 +106,63 @@ log() {
 
 # 获取CPU使用率
 get_cpu_usage() {
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}')
+    # 使用更可靠的方式获取CPU使用率 - 使用多种方法并取平均值
+    # 方法1: 使用 /proc/stat 计算更准确的CPU使用率
+    local cpu_idle_1=$(grep 'cpu ' /proc/stat | awk '{print $5}')
+    local cpu_total_1=$(grep 'cpu ' /proc/stat | awk '{total=$2+$3+$4+$5+$6+$7+$8; print total}')
+    sleep 0.2
+    local cpu_idle_2=$(grep 'cpu ' /proc/stat | awk '{print $5}')
+    local cpu_total_2=$(grep 'cpu ' /proc/stat | awk '{total=$2+$3+$4+$5+$6+$7+$8; print total}')
+    
+    local cpu_idle_diff=$((cpu_idle_2 - cpu_idle_1))
+    local cpu_total_diff=$((cpu_total_2 - cpu_total_1))
+    local cpu_usage_1=0
+    
+    if [ $cpu_total_diff -gt 0 ]; then
+        cpu_usage_1=$(echo "scale=1; 100 * (1 - $cpu_idle_diff / $cpu_total_diff)" | bc)
+    fi
+    
+    # 方法2: 用mpstat (如果安装了sysstat)
+    local cpu_usage_2=0
+    if command -v mpstat &> /dev/null; then
+        cpu_usage_2=$(mpstat 1 1 | grep -A 5 "%idle" | tail -n 1 | awk '{print 100 - $NF}')
+    fi
+    
+    # 方法3: 使用原始的top命令方法作为备用
+    local cpu_usage_3=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}')
+    
+    # 根据可用方法计算最终使用率
+    local valid_methods=0
+    local cpu_usage_sum=0
+    
+    # 检查每个方法的值是否有效
+    if [ $(echo "$cpu_usage_1 >= 0" | bc) -eq 1 ] && [ $(echo "$cpu_usage_1 <= 100" | bc) -eq 1 ]; then
+        cpu_usage_sum=$(echo "$cpu_usage_sum + $cpu_usage_1" | bc)
+        valid_methods=$((valid_methods + 1))
+    fi
+    
+    if [ $(echo "$cpu_usage_2 > 0" | bc) -eq 1 ] && [ $(echo "$cpu_usage_2 <= 100" | bc) -eq 1 ]; then
+        cpu_usage_sum=$(echo "$cpu_usage_sum + $cpu_usage_2" | bc)
+        valid_methods=$((valid_methods + 1))
+    fi
+    
+    if [ $(echo "$cpu_usage_3 >= 0" | bc) -eq 1 ] && [ $(echo "$cpu_usage_3 <= 100" | bc) -eq 1 ]; then
+        cpu_usage_sum=$(echo "$cpu_usage_sum + $cpu_usage_3" | bc)
+        valid_methods=$((valid_methods + 1))
+    fi
+    
+    # 计算平均值或使用默认值
+    local cpu_usage=0
+    if [ $valid_methods -gt 0 ]; then
+        cpu_usage=$(echo "scale=1; $cpu_usage_sum / $valid_methods" | bc)
+    fi
+    
+    # 如果计算的使用率超过100%，则设为100%
+    if [ $(echo "$cpu_usage > 100" | bc) -eq 1 ]; then
+        cpu_usage=100.0
+    fi
+    
+    # 获取CPU负载
     cpu_load=$(cat /proc/loadavg | awk '{print $1","$2","$3}')
     echo "{\"usage_percent\":$cpu_usage,\"load_avg\":[$cpu_load]}"
 }
